@@ -60,18 +60,16 @@ class CheckpointNormativeTests(CheckpointCase):
             self.assertTrue(torch.equal(tensor, expected[name]))
 
     def test_moldetr_extracts_and_casts_state_while_preserving_aliases_and_metadata(self):
-        weights, source_hash, output_hash, definitions, inert_global = self.mol_source_and_outputs()
+        weights, source_hash, inert_global = self.mol_source()
 
         checkpoints.sanitize(
             weights,
             source_hash,
-            output_definitions=definitions,
             precision="fp16",
             extract="model",
             inert_globals=(inert_global,),
         )
 
-        self.assertEqual(self.digest(weights), output_hash)
         with checkpoints.verified_weights(weights) as streams:
             state = torch.load(streams[weights], map_location="cpu", weights_only=True)
         self.assertEqual(set(state), {"first", "alias", "integer_buffer"})
@@ -80,3 +78,18 @@ class CheckpointNormativeTests(CheckpointCase):
         self.assertEqual(state["first"].data_ptr(), state["alias"].data_ptr())
         self.assertEqual(state._metadata, OrderedDict((("", {"version": 3}),)))
         self.assertEqual(json.loads(checkpoints.marker_path(weights).read_text())["precision"], "fp16")
+
+    def test_repeated_sanitization_verifies_and_cleans_partials(self):
+        weights, source_hash, inert_global = self.mol_source()
+        checkpoints.sanitize(weights, source_hash, precision="fp16", extract="model",
+                             inert_globals=(inert_global,))
+        self.directory.chmod(0o755)
+        partials = [weights.with_name(weights.name + ".part"),
+                    weights.with_name(weights.name + ".sanitize.part"),
+                    checkpoints.marker_path(weights).with_suffix(".part")]
+        for partial in partials:
+            partial.write_bytes(b"leftover")
+        before = self.digest(weights)
+        checkpoints.sanitize(weights, source_hash, precision="fp16", extract="model")
+        self.assertEqual(self.digest(weights), before)
+        self.assertTrue(all(not partial.exists() for partial in partials))

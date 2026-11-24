@@ -2,9 +2,9 @@ name: moldetr-weights
 
 # Acquire the pinned MolDeTr checkpoint into one persistent Docker volume
 # volume-init grants downloader ownership, download installs verified files,
-# and verify independently checks the sealed volume without network or writes
+# and verify checks sanitized hashes without network or writes
 # Run with an explicit local Docker context and Compose project
-# `make weights/download` runs initialization, download and verification in order
+# `make weights/download` initializes the volume and verifies each source download
 # Recheck without downloading weights: `run --rm --no-deps verify`.
 #
 # Output lives in Docker's <project>_checkpoints volume, not in this checkout
@@ -40,14 +40,6 @@ x-checksums: &checksums
   type: bind
   source: model/checkpoints.sha256
   target: /checks/checkpoints.sha256
-  read_only: true
-  bind:
-    create_host_path: false
-
-x-export-checksums: &export-checksums
-  type: bind
-  source: model/exported.sha256
-  target: /checks/exported.sha256
   read_only: true
   bind:
     create_host_path: false
@@ -102,7 +94,6 @@ services:
         volume:
           nocopy: true
       - *checksums
-      - *export-checksums
     entrypoint: [/bin/sh, -eu, -c]
     command:
       - |
@@ -139,11 +130,7 @@ services:
               chmod 0444 "$$checkpoint_file"
               continue
             fi
-            if ! awk -v digest="$$actual" '$$1 == digest { found=1 } END { exit !found }' /checks/exported.sha256; then
-              printf 'Cannot restore %s: unrecognized SHA-256 %s\n' "$$checkpoint_file" "$$actual" >&2
-              exit 1
-            fi
-            printf 'Restoring the original training checkpoint over the verified export of %s\n' "$$checkpoint_file"
+            printf 'Restoring the pinned source of %s\n' "$$checkpoint_file"
           fi
 
           partial_file=$$checkpoint_file.part
@@ -172,48 +159,11 @@ services:
           rm -f "$$checkpoint_file.sanitized.json"
           sync -f /checkpoints
           mv "$$partial_file" "$$checkpoint_file"
+          sync -f /checkpoints
         done < "$$checksum_file"
 
         # Leave the verified checkpoint readable by the model worker.
         chmod 0555 /checkpoints
-
-  verify:
-    <<: *contained
-    user: "curl_user:curl_group"
-    network_mode: none
-    pids_limit: 16
-    cpus: 0.25
-    mem_limit: 32m
-    memswap_limit: 32m
-    depends_on:
-      download:
-        condition: service_completed_successfully
-    working_dir: /checkpoints
-    volumes:
-      - type: volume
-        source: checkpoints
-        target: /checkpoints
-        read_only: true
-        volume:
-          nocopy: true
-      - *checksums
-      - *export-checksums
-    entrypoint: [/bin/sh, -eu, -c]
-    command:
-      - |
-        while read -r source_hash size filename; do
-          case "$$source_hash" in '#'*) continue ;; esac
-          actual=$$(sha256sum "$$filename")
-          actual=$${actual%% *}
-          if test "$$actual" = "$$source_hash"; then
-            printf '%s: verified upstream checkpoint\n' "$$filename"
-          else
-            awk -v digest="$$actual" -v file="$$filename" '
-              $$1 == digest { print file ": verified " $$2 " export"; found=1; exit }
-              END { if (!found) { print file ": unrecognized SHA-256 " digest > "/dev/stderr"; exit 1 } }
-            ' /checks/exported.sha256
-          fi
-        done < /checks/checkpoints.sha256
 
   sanitize:
     <<: *contained
@@ -232,6 +182,24 @@ services:
         volume:
           nocopy: true
       - *checksums
-      - *export-checksums
 
-    entrypoint: [python, -IB, /opt/sanitize/checkpoints.py, --output-manifest, /checks/exported.sha256, --extract, model, --inert-global, fastcore.foundation.L]
+    entrypoint: [python, -IB, /opt/sanitize/checkpoints.py, --extract, model, --inert-global, fastcore.foundation.L]
+
+  verify:
+    <<: *contained
+    image: moldetr/weights-sanitizer:local
+    user: "100:101"
+    network_mode: none
+    cpus: 1
+    pids_limit: 16
+    mem_limit: 64m
+    memswap_limit: 64m
+    volumes:
+      - type: volume
+        source: checkpoints
+        target: /checkpoints
+        read_only: true
+        volume:
+          nocopy: true
+      - *checksums
+    entrypoint: [python, -IB, /opt/sanitize/checkpoints.py, --verify]

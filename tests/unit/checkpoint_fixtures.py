@@ -68,7 +68,7 @@ class CheckpointCase(unittest.TestCase):
         )
         return weights, config
 
-    def mol_source_and_outputs(self):
+    def mol_source(self):
         weights = self.directory / "moldetr.pth"
         shared = torch.tensor([1.0, 2.0], dtype=torch.float32)
         state = OrderedDict((
@@ -81,20 +81,5 @@ class CheckpointCase(unittest.TestCase):
         self.save(weights, source)
         source_hash = self.digest(weights)
 
-        expected = OrderedDict((
-            ("first", shared.to(torch.float16)),
-            ("alias", shared.to(torch.float16)),
-            ("integer_buffer", torch.tensor([2], dtype=torch.int64)),
-        ))
-        expected._metadata = OrderedDict((("", {"version": 3}),))
-        # Preserve the exact shared view that the converter is expected to retain.
-        expected["alias"] = expected["first"]
-        expected_file = self.directory / "expected.pth"
-        self.save(expected_file, expected)
-        output_hash = self.digest(expected_file)
-        definitions = {
-            "keep": (source_hash, "preserve"),
-            "fp16": (output_hash, "float16"),
-        }
         inert_global = f"{TrainingMetadata.__module__}.{TrainingMetadata.__qualname__}"
-        return weights, source_hash, output_hash, definitions, inert_global
+        return weights, source_hash, inert_global

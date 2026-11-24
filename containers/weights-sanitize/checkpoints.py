@@ -1,7 +1,7 @@
 """Prepare PyTorch inference checkpoints and admit only marked generations.
 
 Preparation verifies pinned input digests and uses restricted deserialization.
-Admission checks only the selected receipt generation, without rehashing weights.
+Admission hashes the selected files before passing the same open files to loaders.
 Managed writers must remove that receipt before replacing any covered file,
 publish files by rename, and publish a fresh receipt last. Admission hands the
 same open files to the loader, so later renames cannot change its inputs.
@@ -17,15 +17,12 @@ from pathlib import Path
 
 
 POLICY = "torch-weights-only-v1"
+FP_MODES = {"keep": None, "fp16": "float16", "bf16": "bfloat16", "fp32": "float32", "fp64": "float64"}
 
 
 def rows(manifest):
     return [line.split() for line in Path(manifest).read_text().splitlines()
             if line.strip() and not line.lstrip().startswith("#")]
-
-
-def exports(manifest):
-    return {mode: (digest, dtype) for digest, mode, dtype in rows(manifest)}
 
 
 def marker_path(path):
@@ -42,7 +39,7 @@ def sync_directory(directory):
 
 @contextmanager
 def verified_weights(path, companions=()):
-    """Admit selected files without repeating preparation's full-file hashes."""
+    """Hash selected files and keep those exact descriptors open for loading."""
     path = Path(path)
     paths = [path, *(Path(companion) for companion in companions)]
     marker = marker_path(path)
@@ -58,6 +55,11 @@ def verified_weights(path, companions=()):
                 set(receipt["files"]) != {item.name for item in paths}):
             raise ValueError(f"Cannot load {path}: its sanitization receipt covers another policy or file set")
         streams = {item: stack.enter_context(item.open("rb")) for item in paths}
+        for item, stream in streams.items():
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest != receipt["files"][item.name]:
+                raise ValueError(f"Cannot load {item}: SHA-256 {digest} differs from its sanitization marker")
+            stream.seek(0)
         # Writers unlink before replacement. A changed marker means these files
         # may straddle generations; after this check their open inodes stay fixed.
         if not os.path.samestat(os.fstat(receipt_stream.fileno()), marker.stat()):
@@ -100,15 +102,14 @@ def convert_precision(value, dtype, converted):
     return value
 
 
-def sanitize(path, source_hash, *, output_definitions=None, precision="keep",
+def sanitize(path, source_hash, *, precision="keep",
              extract=None, inert_globals=(), companions=None):
     """Certify an existing restricted-loadable file, or publish a converted one."""
     import torch
 
     path = Path(path)
     companions = companions or {}
-    definitions = output_definitions or {}
-    target_hash, dtype = definitions.get(precision, (source_hash, "preserve"))
+    dtype = FP_MODES[precision]
     hashes = {}
     for companion, expected in companions.items():
         with companion.open("rb") as stream:
@@ -120,13 +121,19 @@ def sanitize(path, source_hash, *, output_definitions=None, precision="keep",
     with path.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
         stream.seek(0)
-        if digest == target_hash:
-            # Existing approved outputs need no rewrite or extra safe globals.
-            torch.load(stream, map_location="cpu", weights_only=True)
+        if digest != source_hash:
+            # Repeated preparation is a no-op only for an intact marked output.
+            try:
+                with verified_weights(path, companions=companions):
+                    receipt = json.loads(marker_path(path).read_text())
+            except FileNotFoundError as error:
+                raise ValueError(
+                    f"Cannot sanitize {path}: no marker covers this output; restore the pinned source with make weights/download first"
+                ) from error
+            if receipt["precision"] != precision:
+                raise ValueError("To change precision, restore the source with make weights/download first")
             state = None
-        elif digest == source_hash:
-            # Class objects work on both older and newer PyTorch versions;
-            # named (class, global) pairs are unavailable in the CPU profile.
+        else:
             receivers = []
             for name in inert_globals:
                 module, _, class_name = name.rpartition(".")
@@ -135,12 +142,6 @@ def sanitize(path, source_hash, *, output_definitions=None, precision="keep",
                 state = torch.load(stream, map_location="cpu", weights_only=True)
             if extract:
                 state = state[extract]
-        elif definitions and digest == definitions["keep"][0]:
-            state = torch.load(stream, map_location="cpu", weights_only=True)
-        elif digest in {item[0] for item in definitions.values()}:
-            raise ValueError("To change precision, restore the full-precision source with make weights/download first")
-        else:
-            raise ValueError(f"Cannot sanitize {path}: SHA-256 {digest} is not a pinned source or selected output")
 
     marker = marker_path(path)
     partial = path.with_name(path.name + ".sanitize.part")
@@ -149,8 +150,8 @@ def sanitize(path, source_hash, *, output_definitions=None, precision="keep",
     try:
         partial.unlink(missing_ok=True)
         marker_partial.unlink(missing_ok=True)
-        if state is not None:
-            if dtype != "preserve":
+        if state is not None and (extract or dtype is not None):
+            if dtype is not None:
                 state = convert_precision(state, getattr(torch, dtype), {})
             with partial.open("xb") as stream:
                 torch.save(state, stream)
@@ -161,8 +162,6 @@ def sanitize(path, source_hash, *, output_definitions=None, precision="keep",
             torch.load(partial, map_location="cpu", weights_only=True)
             with partial.open("rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
-            if digest != target_hash:
-                raise ValueError(f"Cannot publish {path}: output SHA-256 {digest} differs from {target_hash}")
             partial.chmod(0o444)
             marker.unlink(missing_ok=True)
             sync_directory(path.parent)
@@ -195,19 +194,19 @@ def main():
     parser.add_argument("--manifest", type=Path, default=Path("/checks/checkpoints.sha256"))
     parser.add_argument("--pattern", default="*")
     parser.add_argument("--companion", action="append", default=[])
-    parser.add_argument("--output-manifest", type=Path)
+    parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--list-fp", action="store_true")
     parser.add_argument("--extract")
     parser.add_argument("--inert-global", action="append", default=[])
-    parser.add_argument("--fp", default="keep")
+    parser.add_argument("--fp", choices=FP_MODES, default="keep")
     args = parser.parse_args()
-    definitions = exports(args.output_manifest) if args.output_manifest else None
-    if args.fp not in (definitions or {"keep": None}):
-        parser.error(f"Choose --fp from {', '.join(definitions or {'keep': None})}")
-    if (args.extract or args.inert_global) and not definitions:
-        parser.error("Extraction needs --output-manifest so only pinned inference outputs can be published")
-    import torch
+    if args.list_fp:
+        print(" ".join(FP_MODES))
+        return
+    if not args.verify:
+        import torch
+        torch.set_num_threads(1)
 
-    torch.set_num_threads(1)
     sources = {name: digest for digest, _limit, name in rows(args.manifest)}
     selected = [name for name in sources if fnmatch.fnmatchcase(name, args.pattern)]
     if not selected:
@@ -216,8 +215,12 @@ def main():
         path = args.directory / name
         companions = {path.with_name(item): sources[str(Path(name).with_name(item))]
                       for item in args.companion}
-        sanitize(path, sources[name], output_definitions=definitions, precision=args.fp,
-                 extract=args.extract, inert_globals=args.inert_global, companions=companions)
+        if args.verify:
+            with verified_weights(path, companions=companions):
+                print(f"Verified {path}", flush=True)
+        else:
+            sanitize(path, sources[name], precision=args.fp,
+                     extract=args.extract, inert_globals=args.inert_global, companions=companions)
 
 
 if __name__ == "__main__":

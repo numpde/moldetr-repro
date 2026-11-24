@@ -14,7 +14,7 @@ class MakefileTests(OperatorFixture, unittest.TestCase):
                 self.assertFalse(self.calls())
 
     def test_each_explicit_precision_reaches_container_from_another_directory(self):
-        choices = [line.split()[1] for line in (ROOT / "model/exported.sha256").read_text().splitlines() if not line.startswith("#")]
+        choices = ("keep", "fp16", "bf16", "fp32", "fp64")
         for precision in choices:
             result = self.make("weights/sanitize", "DOCKER_CONTEXT=science", "FP=" + precision, cwd=self.directory)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -31,7 +31,7 @@ class MakefileTests(OperatorFixture, unittest.TestCase):
         result = self.make("weights/download", "DOCKER_CONTEXT=science", "PROXY_URL=" + proxy)
         self.assertEqual(result.returncode, 0, result.stderr)
         runs = self.calls()[1:]
-        self.assertEqual([call["args"][-1] for call in runs], ["volume-init", "download", "verify"])
+        self.assertEqual([call["args"][-1] for call in runs], ["volume-init", "download"])
         self.assertTrue(all(call["env"]["PROXY_URL"] == proxy for call in runs))
         self.assertEqual(runs[1]["args"][-3:], ["--name", "moldetr-weights-writer", "download"])
 

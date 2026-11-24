@@ -38,33 +38,21 @@ class CheckpointAdversarialTests(CheckpointCase):
         checkpoints.sanitize(
             weights,
             source_hash,
-            output_definitions={"keep": (source_hash, "preserve")},
         )
         marker = checkpoints.marker_path(weights)
         old_receipt = marker.read_bytes()
 
-        self.directory.chmod(0o755)
-        expected = self.directory / "wrong-output.pth"
-        self.save(expected, OrderedDict((("weight", torch.tensor([1.0], dtype=torch.float16)),)))
-        wrong_hash = "0" * 64
-        with self.assertRaisesRegex(ValueError, "output SHA-256"):
-            checkpoints.sanitize(
-                weights,
-                source_hash,
-                output_definitions={
-                    "keep": (source_hash, "preserve"),
-                    "fp16": (wrong_hash, "float16"),
-                },
-                precision="fp16",
-            )
+        with patch.object(torch, "save", side_effect=OSError("injected serialization failure")):
+            with self.assertRaisesRegex(OSError, "serialization failure"):
+                checkpoints.sanitize(weights, source_hash, precision="fp16")
 
         self.assertEqual(marker.read_bytes(), old_receipt)
         with checkpoints.verified_weights(weights) as streams:
             admitted = torch.load(streams[weights], weights_only=True)
         self.assertEqual(admitted["weight"].dtype, torch.float32)
 
-    def test_postreplacement_failure_leaves_no_receipt_and_retry_finishes(self):
-        weights, source_hash, _, definitions, inert_global = self.mol_source_and_outputs()
+    def test_postreplacement_failure_requires_source_restore(self):
+        weights, source_hash, inert_global = self.mol_source()
         marker = checkpoints.marker_path(weights)
         original_replace = Path.replace
 
@@ -78,29 +66,21 @@ class CheckpointAdversarialTests(CheckpointCase):
                 checkpoints.sanitize(
                     weights,
                     source_hash,
-                    output_definitions=definitions,
                     precision="fp16",
                     extract="model",
                     inert_globals=(inert_global,),
                 )
 
         self.assertFalse(marker.exists())
-        self.assertEqual(self.digest(weights), definitions["fp16"][0])
+        self.assertNotEqual(self.digest(weights), source_hash)
         with self.assertRaises(FileNotFoundError):
             with checkpoints.verified_weights(weights):
-                self.fail("replaced weights remain unavailable until retry publishes a receipt")
+                self.fail("unmarked replacement weights must remain unavailable")
 
-        checkpoints.sanitize(
-            weights,
-            source_hash,
-            output_definitions=definitions,
-            precision="fp16",
-            extract="model",
-            inert_globals=(inert_global,),
-        )
-        self.assertTrue(marker.exists())
-        with checkpoints.verified_weights(weights) as streams:
-            self.assertEqual(torch.load(streams[weights], weights_only=True)["first"].dtype, torch.float16)
+        with self.assertRaisesRegex(ValueError, "restore the pinned source"):
+            checkpoints.sanitize(weights, source_hash, precision="fp16", extract="model")
+        self.assertFalse(marker.exists())
+        self.assertFalse(weights.with_name(weights.name + ".sanitize.part").exists())
 
     def test_marker_invalidation_during_opening_rejects_mixed_generation(self):
         weights, config = self.make_bundle()
@@ -169,3 +149,20 @@ class CheckpointAdversarialTests(CheckpointCase):
         current = torch.load(weights, map_location="cpu", weights_only=True)
         self.assertEqual(admitted["generation"].item(), 1)
         self.assertEqual(current["generation"].item(), 2)
+
+    def test_payload_hash_mismatch_refuses_before_loading(self):
+        weights, config = self.make_bundle()
+        weights.chmod(0o644)
+        weights.write_bytes(b"changed weights")
+        with patch.object(torch, "load") as load:
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                with checkpoints.verified_weights(weights, companions=(config,)):
+                    self.fail("changed weights must not be admitted")
+            load.assert_not_called()
+
+    def test_companion_hash_mismatch_refuses(self):
+        weights, config = self.make_bundle()
+        config.write_text("changed config")
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            with checkpoints.verified_weights(weights, companions=(config,)):
+                self.fail("changed config must not be admitted")

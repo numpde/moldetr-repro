@@ -67,16 +67,14 @@ weights/download: ## Download or restore pinned source weights. Inputs DOCKER_CO
 	@$(operator_inputs); \
 	proxy=$$(choose PROXY_URL); select_docker; export PROXY_URL="$$proxy"; \
 	weights_run volume-init; \
-	weights_run --name moldetr-weights-writer download; \
-	weights_run verify
+	weights_run --name moldetr-weights-writer download
 
 weights/verify: ## Verify stored weights offline. Input DOCKER_CONTEXT.
 	@$(operator_inputs); select_docker; weights_run verify
 
 weights/sanitize: ## Replace weights and publish a receipt. Inputs DOCKER_CONTEXT, FP=<precision>.
 	@$(operator_inputs); \
-	choices=$$(awk '!/^\#/ && NF { print $$2 }' "$(REPOSITORY_ROOT)/model/exported.sha256" | paste -sd ' '); \
-	test -n "$$choices" || { printf '%s\n' 'No FP choices are available in model/exported.sha256.' >&2; exit 2; }; \
+	choices=$$($(HOST_PYTHON) "$(REPOSITORY_ROOT)/containers/weights-sanitize/checkpoints.py" --list-fp); \
 	precision=$$(choose FP "$$choices"); select_docker; \
 	weights_run --name moldetr-weights-writer sanitize --fp "$$precision"
 
