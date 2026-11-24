@@ -6,7 +6,7 @@ startup, call dispatch and retirement. This module owns resident model state
 and maps predictions to the types declared in wire.py.
 
 Both inference variants use this binding. Device compatibility must be
-established by qualifying the built worker image on its target device.
+tested by executing the built worker image on its target device.
 """
 
 import hashlib

@@ -2,7 +2,7 @@
 
 import json
 import os
-from pathlib import Path
+import pathlib
 import pty
 import re
 import select
@@ -11,17 +11,23 @@ import subprocess
 import tempfile
 import time
 
-ROOT = Path(__file__).resolve().parents[2]
+# Source location anchors repository paths independently of operator settings.
+# repo-check: allow-module-constant
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 class OperatorFixture:
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
+
         self.addCleanup(self.temporary.cleanup)
-        self.directory = Path(self.temporary.name)
+        self.directory = pathlib.Path(self.temporary.name)
         self.log = self.directory / "docker.jsonl"
+
         docker = self.directory / "docker"
-        docker.write_text("""#!/usr/bin/env python3
+
+        docker.write_text(
+            """#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
@@ -43,28 +49,46 @@ elif args[2:3] == ["image"] or args[2:3] == ["run"]:
     pass
 else:
     sys.exit(int(os.environ.get("TEST_DOCKER_STATUS", "0")))
-""")
+"""
+        )
+
         docker.chmod(0o755)
         definition = (ROOT / "docker-bake.hcl").read_text()
+
         target = {
-            "args": {name: re.search(name + r' = "([^"]+)"', definition)[1]
-                     for name in ("PYTHON_BASE", "PY_VERSION")},
-            "platforms": ["linux/amd64"], "tags": ["moldetr/weights-sanitizer:local"],
+            "args": {
+                name: re.search(name + r' = "([^"]+)"', definition)[1]
+                for name in ("PYTHON_BASE", "PY_VERSION")
+            },
+            "platforms": ["linux/amd64"],
+            "tags": ["moldetr/weights-sanitizer:local"],
         }
+
         self.environment = {
-            **os.environ, "PATH": str(self.directory) + os.pathsep + os.environ["PATH"],
+            **os.environ,
+            "PATH": str(self.directory) + os.pathsep + os.environ["PATH"],
             "TEST_BAKE_TARGET": json.dumps(target),
-            "TEST_DOCKER_LOG": str(self.log), "FP": "fp16", "REPRO_FP": "fp16",
-            "TEST_ENDPOINT": "unix:///tmp/science.sock", "TEST_DOCKER_STATUS": "0",
-            "DOCKER_HOST": "tcp://unwanted", "COMPOSE_FILE": "unwanted.yaml",
-            "REPRO_EXPLICIT_INPUTS": "FP", "PYTHONDONTWRITEBYTECODE": "1",
+            "TEST_DOCKER_LOG": str(self.log),
+            "FP": "fp16",
+            "REPRO_FP": "fp16",
+            "TEST_ENDPOINT": "unix:///tmp/science.sock",
+            "TEST_DOCKER_STATUS": "0",
+            "DOCKER_HOST": "tcp://unwanted",
+            "COMPOSE_FILE": "unwanted.yaml",
+            "REPRO_EXPLICIT_INPUTS": "FP",
+            "PYTHONDONTWRITEBYTECODE": "1",
         }
 
     def make(self, *arguments, cwd=ROOT, makefile=None):
         return subprocess.run(
-            ["make", "--no-print-directory", "-f", str(makefile or ROOT / "Makefile"), *arguments],
-            cwd=cwd, env=self.environment, stdin=subprocess.DEVNULL,
-            text=True, capture_output=True, start_new_session=True, timeout=15,
+            ["make", "--no-print-directory", "-f", str(makefile or (ROOT / "Makefile")), *arguments],
+            cwd=cwd,
+            env=self.environment,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            start_new_session=True,
+            timeout=15,
         )
 
     def calls(self):
@@ -72,17 +96,28 @@ else:
 
     def check_build_cleanup(self, status):
         pool = self.directory / "wheel pool"
+
         pool.mkdir()
         self.environment["TEST_DOCKER_STATUS"] = status
-        result = self.make("build", "PROFILE=weights-sanitize", "DOCKER_CONTEXT=science", f"WHEELHOUSE={pool}")
-        self.assertEqual(result.returncode == 0, status == "0", result.stderr)
+
+        command_result = self.make(
+            "build",
+            "PROFILE=weights-sanitize",  # machine-string: Literal Make variable assignment.
+            "DOCKER_CONTEXT=science",  # machine-string: Literal Make variable assignment.
+            f"WHEELHOUSE={pool}",  # machine-string: Literal Make variable assignment.
+        )
+
+        self.assertEqual(first=status == "0", second=command_result.returncode == 0, msg=command_result.stderr)
         args = self.calls()[-1]["args"]
-        self.assertEqual(args[2:4], ["buildx", "bake"])
+
+        self.assertEqual(first=["buildx", "bake"], second=args[2:4])
         self.assertIn("weights-sanitize", args)
-        stage = Path(args[args.index("--set") + 1].split("=", 1)[1])
+        stage = pathlib.Path(args[args.index("--set") + 1].split("=", 1)[1])
+
         self.assertFalse(stage.exists())
         preparation = next(call["args"] for call in self.calls() if call["args"][2:3] == ["run"])
-        self.assertEqual(preparation[preparation.index("--network") + 1], "none")
+
+        self.assertEqual(first="none", second=preparation[preparation.index("--network") + 1])
         self.assertIn("--require-hashes", preparation)
         self.assertIn("--no-index", preparation)
 
@@ -90,42 +125,64 @@ else:
         for answer in answers:
             with self.subTest(answer=answer):
                 self.log.unlink(missing_ok=True)
-                pid, fd = pty.fork()
+                (pid, fd) = pty.fork()
+
                 if pid == 0:
                     os.chdir(ROOT)
-                    os.execvpe("make", ["make", "--no-print-directory", "weights/sanitize", "DOCKER_CONTEXT=science"], self.environment)
+
+                    os.execvpe(
+                        "make",
+                        [
+                            "make",
+                            "--no-print-directory",
+                            "weights/sanitize",
+                            "DOCKER_CONTEXT=science",  # machine-string: Literal Make variable assignment.
+                        ],
+                        self.environment,
+                    )
+
                 output = b""
                 sent = False
+
                 try:
                     deadline = time.monotonic() + 10
+
                     while time.monotonic() < deadline:
-                        ready, _, _ = select.select([fd], [], [], 0.1)
+                        (ready, _, _) = select.select([fd], [], [], 0.1)
+
                         if ready:
                             try:
                                 chunk = os.read(fd, 65536)
                             except OSError:
                                 break
+
                             if not chunk:
                                 break
+
                             output += chunk
-                            if b"Select FP" in output and not sent:
+
+                            if (b"Select FP" in output) and (not sent):
                                 self.assertIn(b"1) keep", output)
                                 self.assertIn(b"5) fp64", output)
                                 os.write(fd, answer)
                                 sent = True
                     else:
                         self.fail("Interactive selection timed out")
-                    _, status = os.waitpid(pid, 0)
+
+                    (_, status) = os.waitpid(pid, 0)
                     pid = None
-                    self.assertTrue(sent, output.decode())
+
+                    self.assertTrue(sent, msg=output.decode())
+
                     if answer == b"2\n":
-                        self.assertEqual(os.waitstatus_to_exitcode(status), 0, output.decode())
-                        self.assertEqual(self.calls()[-1]["args"][-2:], ["--fp", "fp16"])
+                        self.assertEqual(first=0, second=os.waitstatus_to_exitcode(status), msg=output.decode())
+                        self.assertEqual(first=["--fp", "fp16"], second=self.calls()[-1]["args"][-2:])
                     else:
                         self.assertNotEqual(os.waitstatus_to_exitcode(status), 0)
                         self.assertFalse(self.calls())
                 finally:
                     os.close(fd)
+
                     if pid is not None:
                         os.kill(pid, signal.SIGKILL)
                         os.waitpid(pid, 0)
