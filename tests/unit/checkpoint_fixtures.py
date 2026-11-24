@@ -8,7 +8,7 @@ import unittest
 
 import torch
 
-import checkpoints
+import sanitize
 
 
 class TrainingMetadata:
@@ -61,7 +61,7 @@ class CheckpointCase(unittest.TestCase):
             },
         )
         config.write_text(f"fixture:\n  name: {tag}\n")
-        checkpoints.sanitize(
+        sanitize.sanitize(
             weights,
             self.digest(weights),
             companions={config: self.digest(config)},

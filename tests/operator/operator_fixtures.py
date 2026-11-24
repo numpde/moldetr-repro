@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import signal
 import subprocess
@@ -33,21 +34,35 @@ with open(os.environ["TEST_DOCKER_LOG"], "a") as f:
     f.write(json.dumps({"args": args, "env": recorded_env}) + "\\n")
 if args[:2] == ["context", "inspect"]:
     print(os.environ.get("TEST_ENDPOINT", "unix:///tmp/science.sock"))
+elif args[2:3] == ["info"]:
+    print(json.dumps(["name=rootless"]))
+elif args[2:4] == ["buildx", "bake"] and "--print" in args:
+    target = json.loads(os.environ["TEST_BAKE_TARGET"])
+    print(json.dumps({"target": {args[-1]: target}}))
+elif args[2:3] == ["image"] or args[2:3] == ["run"]:
+    pass
 else:
     sys.exit(int(os.environ.get("TEST_DOCKER_STATUS", "0")))
 """)
         docker.chmod(0o755)
+        definition = (ROOT / "docker-bake.hcl").read_text()
+        target = {
+            "args": {name: re.search(name + r' = "([^"]+)"', definition)[1]
+                     for name in ("PYTHON_BASE", "PY_VERSION")},
+            "platforms": ["linux/amd64"], "tags": ["moldetr/weights-sanitizer:local"],
+        }
         self.environment = {
             **os.environ, "PATH": str(self.directory) + os.pathsep + os.environ["PATH"],
+            "TEST_BAKE_TARGET": json.dumps(target),
             "TEST_DOCKER_LOG": str(self.log), "FP": "fp16", "REPRO_FP": "fp16",
             "TEST_ENDPOINT": "unix:///tmp/science.sock", "TEST_DOCKER_STATUS": "0",
             "DOCKER_HOST": "tcp://unwanted", "COMPOSE_FILE": "unwanted.yaml",
             "REPRO_EXPLICIT_INPUTS": "FP", "PYTHONDONTWRITEBYTECODE": "1",
         }
 
-    def make(self, *arguments, cwd=ROOT):
+    def make(self, *arguments, cwd=ROOT, makefile=None):
         return subprocess.run(
-            ["make", "--no-print-directory", "-f", str(ROOT / "Makefile"), *arguments],
+            ["make", "--no-print-directory", "-f", str(makefile or ROOT / "Makefile"), *arguments],
             cwd=cwd, env=self.environment, stdin=subprocess.DEVNULL,
             text=True, capture_output=True, start_new_session=True, timeout=15,
         )
@@ -58,18 +73,18 @@ else:
     def check_build_cleanup(self, status):
         pool = self.directory / "wheel pool"
         pool.mkdir()
-        for line in (ROOT / "builds/weights-sanitize/requirements.lock").read_text().splitlines():
-            (pool / Path(line.split()[0]).name).touch()
         self.environment["TEST_DOCKER_STATUS"] = status
-        result = self.make("weights/build-sanitizer", "DOCKER_CONTEXT=science", f"WHEELHOUSE={pool}")
+        result = self.make("build", "PROFILE=weights-sanitize", "DOCKER_CONTEXT=science", f"WHEELHOUSE={pool}")
         self.assertEqual(result.returncode == 0, status == "0", result.stderr)
         args = self.calls()[-1]["args"]
-        self.assertEqual(args[2:4], ["buildx", "build"])
-        self.assertIn("moldetr/weights-sanitizer:local", args)
-        self.assertEqual(args[-1], str(ROOT / "containers/weights-sanitize"))
-        stage = Path(args[args.index("--build-context") + 1].removeprefix("wheels="))
+        self.assertEqual(args[2:4], ["buildx", "bake"])
+        self.assertIn("weights-sanitize", args)
+        stage = Path(args[args.index("--set") + 1].split("=", 1)[1])
         self.assertFalse(stage.exists())
-        self.assertEqual(args[args.index("--network") + 1], "none")
+        preparation = next(call["args"] for call in self.calls() if call["args"][2:3] == ["run"])
+        self.assertEqual(preparation[preparation.index("--network") + 1], "none")
+        self.assertIn("--require-hashes", preparation)
+        self.assertIn("--no-index", preparation)
 
     def check_terminal_answers(self, answers):
         for answer in answers:

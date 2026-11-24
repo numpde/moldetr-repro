@@ -1,8 +1,9 @@
-FROM docker.io/library/python:3.12.16-slim-bookworm@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487
+ARG PYTHON_BASE
+FROM ${PYTHON_BASE}
 
 RUN --mount=type=bind,from=wheels,target=/wheels \
-    python -m pip install --no-index --no-cache-dir --require-hashes -r /wheels/install.txt && python -m pip check
-COPY checkpoints.py /opt/sanitize/checkpoints.py
+    python -m pip install --no-index --no-cache-dir --no-deps --find-links /wheels --require-hashes -r /wheels/requirements.lock && python -m pip check
+COPY sanitize.py /opt/sanitize/sanitize.py
 # Match the owner of the sealed volume created by curlimages/curl.
 USER 100:101
-ENTRYPOINT ["python", "-IB", "/opt/sanitize/checkpoints.py"]
+ENTRYPOINT ["python", "-IB", "/opt/sanitize/sanitize.py"]

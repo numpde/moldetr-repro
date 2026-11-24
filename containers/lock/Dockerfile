@@ -1,0 +1,6 @@
+ARG PYTHON_BASE
+FROM ${PYTHON_BASE}
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_CACHE_DIR=/tmp/uv UV_PYTHON_DOWNLOADS=never HOME=/tmp PYTHONDONTWRITEBYTECODE=1
+USER 65532:65532
+ENTRYPOINT ["uv", "pip", "compile"]

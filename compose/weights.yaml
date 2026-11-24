@@ -183,7 +183,7 @@ services:
           nocopy: true
       - *checksums
 
-    entrypoint: [python, -IB, /opt/sanitize/checkpoints.py, --extract, model, --inert-global, fastcore.foundation.L]
+    entrypoint: [python, -IB, /opt/sanitize/sanitize.py, --extract, model, --inert-global, fastcore.foundation.L]
 
   verify:
     <<: *contained
@@ -202,4 +202,4 @@ services:
         volume:
           nocopy: true
       - *checksums
-    entrypoint: [python, -IB, /opt/sanitize/checkpoints.py, --verify]
+    entrypoint: [python, -IB, /opt/sanitize/sanitize.py, --verify]

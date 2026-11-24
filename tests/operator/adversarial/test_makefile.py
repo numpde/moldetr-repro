@@ -1,8 +1,9 @@
 """Invalid selections and engine failures stop or clean up the command."""
 
 import unittest
+import shutil
 
-from operator_fixtures import OperatorFixture
+from operator_fixtures import OperatorFixture, ROOT
 
 
 class MakefileTests(OperatorFixture, unittest.TestCase):
@@ -40,3 +41,20 @@ class MakefileTests(OperatorFixture, unittest.TestCase):
 
     def test_out_of_range_terminal_selection(self):
         self.check_terminal_answers((b"99\n",))
+
+    def test_changed_dependency_input_refuses_before_package_staging(self):
+        repository = self.directory / "checkout"
+        repository.mkdir()
+        for name in ("Makefile", "docker-bake.hcl"):
+            shutil.copyfile(ROOT / name, repository / name)
+        for name in ("make", "builds"):
+            shutil.copytree(ROOT / name, repository / name)
+        inputs = repository / "builds/weights-sanitize/requirements.in"
+        inputs.write_text(inputs.read_text() + "\n# changed dependency intent\n")
+        pool = self.directory / "pool"
+        pool.mkdir()
+        result = self.make("build", "PROFILE=weights-sanitize", "DOCKER_CONTEXT=science",
+                           f"WHEELHOUSE={pool}", makefile=repository / "Makefile")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("regenerate with make lock", result.stderr)
+        self.assertFalse(any(call["args"][2:3] == ["run"] for call in self.calls()))

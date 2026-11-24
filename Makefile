@@ -5,13 +5,15 @@ override REPOSITORY_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
 # Capture literal command-line inputs before Make or the shell can interpret them.
 # Omitted inputs are selected at the terminal by the function below.
-override export REPRO_EXPLICIT_INPUTS := $(foreach name,DOCKER_CONTEXT PROXY_URL WHEELHOUSE FP,$(if $(filter command line,$(origin $(name))),$(name)))
+override export REPRO_EXPLICIT_INPUTS := $(foreach name,DOCKER_CONTEXT PROXY_URL WHEELHOUSE PROFILE FP,$(if $(filter command line,$(origin $(name))),$(name)))
 override export REPRO_DOCKER_CONTEXT := $(value DOCKER_CONTEXT)
 override export REPRO_PROXY_URL := $(value PROXY_URL)
 override export REPRO_WHEELHOUSE := $(value WHEELHOUSE)
 override export REPRO_FP := $(value FP)
-unexport DOCKER_CONTEXT PROXY_URL WHEELHOUSE FP
+override export REPRO_PROFILE := $(value PROFILE)
+unexport DOCKER_CONTEXT PROXY_URL WHEELHOUSE PROFILE FP
 override HOST_PYTHON := python3 -B
+override PROFILES := $(notdir $(patsubst %/,%,$(wildcard $(REPOSITORY_ROOT)/builds/*/)))
 
 .PHONY: help
 help: ## List workflows; inputs may prompt on a terminal and environment values never select them.
@@ -62,7 +64,7 @@ weights_run() { weights_compose run --rm --no-deps --pull never -T "$$@"; }
 endef
 
 
-.PHONY: weights/download weights/sanitize weights/verify weights/build-sanitizer
+.PHONY: weights/download weights/sanitize weights/verify
 weights/download: ## Download or restore pinned source weights. Inputs DOCKER_CONTEXT, PROXY_URL=<url-or-none>.
 	@$(operator_inputs); \
 	proxy=$$(choose PROXY_URL); select_docker; export PROXY_URL="$$proxy"; \
@@ -74,21 +76,16 @@ weights/verify: ## Verify stored weights offline. Input DOCKER_CONTEXT.
 
 weights/sanitize: ## Replace weights and publish a receipt. Inputs DOCKER_CONTEXT, FP=<precision>.
 	@$(operator_inputs); \
-	choices=$$($(HOST_PYTHON) "$(REPOSITORY_ROOT)/containers/weights-sanitize/checkpoints.py" --list-fp); \
+	choices=$$($(HOST_PYTHON) "$(REPOSITORY_ROOT)/containers/weights-sanitize/sanitize.py" --list-fp); \
 	precision=$$(choose FP "$$choices"); select_docker; \
 	weights_run --name moldetr-weights-writer sanitize --fp "$$precision"
 
-weights/build-sanitizer: ## Build from cached locked wheels. Inputs DOCKER_CONTEXT, WHEELHOUSE=<directory>.
-	@$(operator_inputs); pool=$$(choose WHEELHOUSE); \
-	test -d "$$pool" || { printf 'WHEELHOUSE must name an existing directory: %s\n' "$$pool" >&2; exit 2; }; \
-	select_docker; \
-	stage=$$(mktemp -d -t moldetr-sanitize-wheels-XXXXXXXX); \
-	trap 'rm -rf -- "$$stage"' EXIT; \
-	cp "$(REPOSITORY_ROOT)/builds/weights-sanitize/requirements.lock" "$$stage/install.txt"; \
-	while read -r wheel checksum; do cp -- "$$pool/$${wheel##*/}" "$$stage/"; done < "$$stage/install.txt"; \
-	"$${docker[@]}" buildx build --builder default --platform linux/amd64 --network none \
-		--build-context "wheels=$$stage" \
-		--tag moldetr/weights-sanitizer:local --load "$(REPOSITORY_ROOT)/containers/weights-sanitize"
+.PHONY: lock build
+lock: ## Resolve a profile lock from cached wheels. Inputs DOCKER_CONTEXT, WHEELHOUSE, PROFILE.
+build: ## Build a profile offline from its lock. Inputs DOCKER_CONTEXT, WHEELHOUSE, PROFILE.
+lock build:
+	@$(operator_inputs); profile=$$(choose PROFILE '$(PROFILES)'); pool=$$(choose WHEELHOUSE); select_docker; \
+	$(HOST_PYTHON) "$(REPOSITORY_ROOT)/make/build.py" "$@" --host "$$docker_host" --pool "$$pool" --profile "$$profile"
 
 .PHONY: test/operator test/operator/normative test/operator/adversarial
 test/operator: test/operator/normative test/operator/adversarial ## Run normative and adversarial host operator tests.
@@ -109,6 +106,6 @@ test/unit/normative test/unit/adversarial:
 		--tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m \
 		-e PYTHONPATH=/tests/unit:/opt/sanitize \
 		--mount "type=bind,src=$(REPOSITORY_ROOT)/tests/unit,dst=/tests/unit,readonly" \
-		--mount "type=bind,src=$(REPOSITORY_ROOT)/containers/weights-sanitize/checkpoints.py,dst=/opt/sanitize/checkpoints.py,readonly" \
+		--mount "type=bind,src=$(REPOSITORY_ROOT)/containers/weights-sanitize/sanitize.py,dst=/opt/sanitize/sanitize.py,readonly" \
 		--entrypoint python moldetr/weights-sanitizer:local \
 		-B -m unittest discover -v -s "/tests/unit/$(@F)" -p 'test_*.py'

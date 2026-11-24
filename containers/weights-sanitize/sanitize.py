@@ -1,10 +1,7 @@
-"""Prepare PyTorch inference checkpoints and admit only marked generations.
+"""Sanitize pinned PyTorch checkpoints and publish their actual file hashes.
 
-Preparation verifies pinned input digests and uses restricted deserialization.
-Admission hashes the selected files before passing the same open files to loaders.
-Managed writers must remove that receipt before replacing any covered file,
-publish files by rename, and publish a fresh receipt last. Admission hands the
-same open files to the loader, so later renames cannot change its inputs.
+Writers invalidate markers before replacing files and publish fresh markers last.
+Verification checks only the selected checkpoint and its declared companions.
 """
 
 import argparse
@@ -38,7 +35,7 @@ def sync_directory(directory):
 
 
 @contextmanager
-def verified_weights(path, companions=()):
+def verified_files(path, companions=()):
     """Hash selected files and keep those exact descriptors open for loading."""
     path = Path(path)
     paths = [path, *(Path(companion) for companion in companions)]
@@ -48,34 +45,23 @@ def verified_weights(path, companions=()):
             receipt_stream = stack.enter_context(marker.open())
         except FileNotFoundError as error:
             raise FileNotFoundError(
-                f"Cannot load {path}: its sanitization receipt is missing; run make weights/sanitize."
+                f"Cannot verify {path}: its sanitization receipt is missing; run make weights/sanitize."
             ) from error
         receipt = json.load(receipt_stream)
         if (receipt["schema"] != 1 or receipt["policy"] != POLICY or
                 set(receipt["files"]) != {item.name for item in paths}):
-            raise ValueError(f"Cannot load {path}: its sanitization receipt covers another policy or file set")
+            raise ValueError(f"Cannot verify {path}: its sanitization receipt covers another policy or file set")
         streams = {item: stack.enter_context(item.open("rb")) for item in paths}
         for item, stream in streams.items():
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
             if digest != receipt["files"][item.name]:
-                raise ValueError(f"Cannot load {item}: SHA-256 {digest} differs from its sanitization marker")
+                raise ValueError(f"Cannot verify {item}: SHA-256 {digest} differs from its sanitization marker")
             stream.seek(0)
         # Writers unlink before replacement. A changed marker means these files
         # may straddle generations; after this check their open inodes stay fixed.
         if not os.path.samestat(os.fstat(receipt_stream.fileno()), marker.stat()):
-            raise ValueError(f"Cannot load {path}: sanitization changed while opening the checkpoint")
+            raise ValueError(f"Cannot verify {path}: sanitization changed while opening the checkpoint")
         yield streams
-
-
-def load_checkpoint(model, path, map_location="cpu"):
-    """Load a selected, sanitized state dict without an unsafe fallback."""
-    import torch
-
-    path = Path(path)
-    with verified_weights(path) as streams:
-        state = torch.load(streams[path], map_location=map_location, weights_only=True)
-    model.load_state_dict(state, strict=True)
-    return model
 
 
 class DiscardedState:
@@ -124,7 +110,7 @@ def sanitize(path, source_hash, *, precision="keep",
         if digest != source_hash:
             # Repeated preparation is a no-op only for an intact marked output.
             try:
-                with verified_weights(path, companions=companions):
+                with verified_files(path, companions=companions):
                     receipt = json.loads(marker_path(path).read_text())
             except FileNotFoundError as error:
                 raise ValueError(
@@ -216,7 +202,7 @@ def main():
         companions = {path.with_name(item): sources[str(Path(name).with_name(item))]
                       for item in args.companion}
         if args.verify:
-            with verified_weights(path, companions=companions):
+            with verified_files(path, companions=companions):
                 print(f"Verified {path}", flush=True)
         else:
             sanitize(path, sources[name], precision=args.fp,
