@@ -1,6 +1,10 @@
 """Supported operator commands, literal inputs, and terminal cancellation."""
 
+import io
 import unittest
+from unittest.mock import patch
+
+from make.build import Build
 
 from operator_fixtures import OperatorFixture, ROOT
 
@@ -56,3 +60,38 @@ class MakefileTests(OperatorFixture, unittest.TestCase):
 
     def test_terminal_selection_and_cancellation(self):
         self.check_terminal_answers((b"2\n", b"\n"))
+
+    def test_sdk_acquire_uses_verified_cache_without_profile_or_network(self):
+        (repository, pool, artifacts) = self.sdk_release()
+
+        for (artifact_name, payload) in artifacts.items():
+            (pool / artifact_name).write_bytes(payload)
+
+        command_result = self.make(
+            "sdk/acquire",
+            "DOCKER_CONTEXT=science",  # machine-string: Literal Make variable assignment.
+            f"WHEELHOUSE={pool}",  # machine-string: Literal Make variable assignment.
+            makefile=repository / "Makefile",
+            cwd=self.directory,
+        )
+
+        self.assertEqual(first=0, second=command_result.returncode, msg=command_result.stderr)
+        self.assertEqual(first=1, second=len(self.calls()))
+        self.assertEqual(first=set(artifacts), second={entry.name for entry in pool.iterdir()})
+
+    def test_sdk_acquire_publishes_only_verified_downloads(self):
+        (repository, pool, artifacts) = self.sdk_release()
+        build = Build("unix:///unused.sock", pool)
+
+        def release_response(url, *, timeout):
+            self.assertTrue(url.startswith("https://github.com/numpde/nmr-provider-tools/releases/download/v9.8.7/"))
+
+            return io.BytesIO(artifacts[url.rsplit("/", 1)[1]])
+
+        with patch("make.build.ROOT", repository), patch("make.build.urllib.request.urlopen", side_effect=release_response):
+            build.sdk_acquire()
+
+        self.assertEqual(first=set(artifacts), second={entry.name for entry in pool.iterdir()})
+
+        for (artifact_name, payload) in artifacts.items():
+            self.assertEqual(first=payload, second=(pool / artifact_name).read_bytes())

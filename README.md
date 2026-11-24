@@ -45,6 +45,21 @@ substantive host workflow is `make/build.py`; Compose owns container execution.
 Both locking and building operate without network access and require cached
 base images and packages. Package staging uses a rootless Docker engine.
 
+Acquire the pinned SDK release assets into the same external wheelhouse:
+
+```sh
+make sdk/acquire DOCKER_CONTEXT=science WHEELHOUSE=/path/to/wheelhouse
+```
+
+`builds/sdk.constraints.txt` selects the SDK version and checksum manifest hash.
+The command verifies or downloads that manifest, the SDK wheel, both installation
+locks and the wheelhouse tool. Cached files with mismatched hashes fail without
+replacement. Missing files are downloaded over host HTTPS into temporary files
+and published only after hash verification; failed transfers leave no partials.
+This bootstrap uses host routing, independently of the weights downloader's
+`PROXY_URL`. It acquires release assets; profile dependencies and installation
+remain separate operations.
+
 Regenerate a lock after changing a profile's dependency inputs:
 
 ```sh

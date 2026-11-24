@@ -1,5 +1,6 @@
 """Temporary fake-engine and terminal fixtures for public Make command tests."""
 
+import hashlib
 import json
 import os
 import pathlib
@@ -7,6 +8,7 @@ import pty
 import re
 import select
 import signal
+import shutil
 import subprocess
 import tempfile
 import time
@@ -93,6 +95,35 @@ else:
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def sdk_release(self):
+        repository = self.directory / "checkout"
+        pool = self.directory / "wheel pool"
+
+        (repository / "builds").mkdir(parents=True)
+        (repository / "make").mkdir()
+        pool.mkdir()
+        shutil.copyfile(ROOT / "Makefile", repository / "Makefile")
+        shutil.copyfile(ROOT / "make/build.py", repository / "make/build.py")
+
+        artifacts = {
+            "wheelhouse-tool-9.8.7.pyz": b"tool fixture",
+            "provider_core-9.8.7-native-install.lock": b"native lock fixture",
+            "provider_core-9.8.7-install.lock": b"full lock fixture",
+            "provider_core-9.8.7-py3-none-any.whl": b"SDK wheel fixture",
+        }
+
+        hashes = {artifact_name: hashlib.sha256(payload).hexdigest() for (artifact_name, payload) in artifacts.items()}
+        manifest = json.dumps(hashes).encode()
+
+        (repository / "builds/sdk.constraints.txt").write_text(
+            f"provider-core==9.8.7\n"
+            f"# release-manifest-sha256 = {hashlib.sha256(manifest).hexdigest()}\n"  # machine-string: SDK release pin fixture.
+        )
+
+        artifacts["provider_core-9.8.7-sha256.json"] = manifest
+
+        return (repository, pool, artifacts)
 
     def check_build_cleanup(self, status):
         pool = self.directory / "wheel pool"

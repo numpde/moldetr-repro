@@ -80,7 +80,11 @@ weights/sanitize: ## Replace weights and publish a receipt. Inputs DOCKER_CONTEX
 	precision=$$(choose FP "$$choices"); select_docker; \
 	weights_run --name moldetr-weights-writer sanitize --fp "$$precision"
 
-.PHONY: lock build
+.PHONY: sdk/acquire lock build
+sdk/acquire: ## Verify or acquire pinned SDK release artifacts. Inputs DOCKER_CONTEXT, WHEELHOUSE.
+	@$(operator_inputs); pool=$$(choose WHEELHOUSE); select_docker; \
+	$(HOST_PYTHON) "$(REPOSITORY_ROOT)/make/build.py" sdk/acquire --host "$$docker_host" --pool "$$pool"
+
 lock: ## Resolve a profile lock from cached wheels. Inputs DOCKER_CONTEXT, WHEELHOUSE, PROFILE.
 build: ## Build a profile offline from its lock. Inputs DOCKER_CONTEXT, WHEELHOUSE, PROFILE.
 lock build:
@@ -92,7 +96,7 @@ test/operator: test/operator/normative test/operator/adversarial ## Run normativ
 test/operator/normative: ## Run normative host operator tests.
 test/operator/adversarial: ## Run adversarial host operator tests.
 test/operator/normative test/operator/adversarial:
-	@PYTHONPATH="$(REPOSITORY_ROOT)/tests/operator" $(HOST_PYTHON) -m unittest discover -v -s "$(REPOSITORY_ROOT)/tests/operator/$(@F)" -p 'test_*.py'
+	@PYTHONPATH="$(REPOSITORY_ROOT):$(REPOSITORY_ROOT)/tests/operator" $(HOST_PYTHON) -m unittest discover -v -s "$(REPOSITORY_ROOT)/tests/operator/$(@F)" -p 'test_*.py'
 
 
 .PHONY: test/unit test/unit/normative test/unit/adversarial

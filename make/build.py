@@ -1,17 +1,24 @@
-"""Generate locks and build images from cached packages without network access."""
+"""Acquire pinned SDK releases and build images from cached packages offline."""
 
 import argparse
 import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
+import urllib.request
 
 
 # Source location anchors repository paths independently of operator settings.
 # repo-check: allow-module-constant
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def digest(artifact_path):
+    with artifact_path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 class Build:
@@ -29,18 +36,63 @@ class Build:
 
         self.docker = ["docker", "--host", host]
 
-        options = json.loads(
-            self.invoke(
-                self.docker + ["info", "--format", "{{json .SecurityOptions}}"],
-                capture_output=True,
-                text=True
-            ).stdout
+    def sdk_acquire(self):
+        constraints = (ROOT / "builds/sdk.constraints.txt").read_text()
+        sdk_version = re.search(r"^provider-core==([^\s]+)$", constraints, re.M)[1]
+        manifest_sha256 = re.search(r"^# release-manifest-sha256 = ([0-9a-f]{64})$", constraints, re.M)[1]
+        release_url = f"https://github.com/numpde/nmr-provider-tools/releases/download/v{sdk_version}/"  # machine-string: Published SDK release URL.
+        manifest_name = f"provider_core-{sdk_version}-sha256.json"  # machine-string: Published SDK checksum manifest filename.
+
+        self.fetch(release_url, manifest_name, manifest_sha256)
+        hashes = json.loads((self.pool / manifest_name).read_text())
+
+        artifact_names = (
+            f"wheelhouse-tool-{sdk_version}.pyz",  # machine-string: Published wheelhouse tool filename.
+            f"provider_core-{sdk_version}-native-install.lock",  # machine-string: Published scientific worker install lock filename.
+            f"provider_core-{sdk_version}-install.lock",  # machine-string: Published full SDK install lock filename.
+            f"provider_core-{sdk_version}-py3-none-any.whl",  # machine-string: Published SDK wheel filename.
         )
 
-        rootless_option = "name=rootless"  # machine-string: Docker security option token.
+        for artifact_name in artifact_names:
+            self.fetch(release_url, artifact_name, hashes[artifact_name])
 
-        if not (rootless_option in options):
-            raise ValueError(f"Offline package staging requires a rootless engine; observed {options=}")
+    def fetch(self, release_url, artifact_name, expected_sha256):
+        destination = self.pool / artifact_name
+
+        if destination.exists():
+            actual_sha256 = digest(destination)
+
+            if not (actual_sha256 == expected_sha256):
+                raise ValueError(f"Cannot use cached {destination=}: {actual_sha256=} differs from the pinned {expected_sha256=}")
+
+            return
+
+        with tempfile.NamedTemporaryFile(dir=self.pool, prefix=".sdk-", delete=False) as output:
+            pending = pathlib.Path(output.name)
+
+            try:
+                with urllib.request.urlopen(release_url + artifact_name, timeout=120) as response:
+                    total_bytes = 0
+
+                    while block := response.read(65536):
+                        total_bytes += len(block)
+
+                        if not (total_bytes <= (8 * 1024 * 1024)):
+                            raise ValueError(f"Cannot acquire {artifact_name=}: {total_bytes=} exceeds the 8 MiB SDK support artifact limit")
+
+                        output.write(block)
+
+                output.flush()
+                os.fsync(output.fileno())
+                actual_sha256 = digest(pending)
+
+                if not (actual_sha256 == expected_sha256):
+                    raise ValueError(f"Cannot acquire {artifact_name=}: downloaded {actual_sha256=} differs from the pinned {expected_sha256=}")
+
+                pending.chmod(0o644)
+                pending.replace(destination)
+            finally:
+                pending.unlink(missing_ok=True)
 
     def invoke(self, arguments, **kwargs):
         return subprocess.run(arguments, cwd=ROOT, env=self.environment, check=True, **kwargs)
@@ -65,6 +117,19 @@ class Build:
         return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
     def container(self, image, profile, stage):
+        options = json.loads(
+            self.invoke(
+                self.docker + ["info", "--format", "{{json .SecurityOptions}}"],
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+
+        rootless_option = "name=rootless"  # machine-string: Docker security option token.
+
+        if not (rootless_option in options):
+            raise ValueError(f"Offline package staging requires a rootless engine; observed {options=}")
+
         return self.docker + [
             "run",
             "--rm",
@@ -216,19 +281,26 @@ class Build:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
 
-    parser.add_argument("operation", choices=("lock", "build"))
+    parser.add_argument("operation", choices=("sdk/acquire", "lock", "build"))
     parser.add_argument("--host", required=True)
     parser.add_argument("--pool", required=True)
 
     parser.add_argument(
         "--profile",
-        required=True,
         choices=sorted(build_path.name for build_path in (ROOT / "builds").iterdir() if build_path.is_dir())
     )
 
     args = parser.parse_args()
 
-    getattr(Build(args.host, args.pool), args.operation)(args.profile)
+    if (args.operation != "sdk/acquire") and (args.profile is None):
+        parser.error("--profile is required for lock and build")
+
+    build = Build(args.host, args.pool)
+
+    if args.operation == "sdk/acquire":
+        build.sdk_acquire()
+    else:
+        getattr(build, args.operation)(args.profile)
 
 
 if __name__ == "__main__":

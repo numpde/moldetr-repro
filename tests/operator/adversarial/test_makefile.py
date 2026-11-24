@@ -1,7 +1,11 @@
 """Invalid selections and engine failures stop or clean up the command."""
 
+import io
 import unittest
 import shutil
+from unittest.mock import patch
+
+from make.build import Build
 
 from operator_fixtures import OperatorFixture, ROOT
 
@@ -96,3 +100,87 @@ class MakefileTests(OperatorFixture, unittest.TestCase):
         self.assertNotEqual(command_result.returncode, 0)
         self.assertIn("regenerate with make lock", command_result.stderr)
         self.assertFalse(any((call["args"][2:3] == ["run"]) for call in self.calls()))
+
+    def test_sdk_acquire_refuses_corrupt_cached_manifest_before_fetching(self):
+        (repository, pool, _) = self.sdk_release()
+        manifest = pool / "provider_core-9.8.7-sha256.json"
+
+        manifest.write_bytes(b"corrupt cache")
+
+        command_result = self.make(
+            "sdk/acquire",
+            "DOCKER_CONTEXT=science",  # machine-string: Literal Make variable assignment.
+            f"WHEELHOUSE={pool}",  # machine-string: Literal Make variable assignment.
+            makefile=repository / "Makefile",
+        )
+
+        self.assertNotEqual(command_result.returncode, 0)
+        self.assertIn("Cannot use cached", command_result.stderr)
+        self.assertIn("sha256.json", command_result.stderr)
+
+        self.assertEqual(first=b"corrupt cache", second=manifest.read_bytes())
+        self.assertEqual(first={manifest.name}, second={entry.name for entry in pool.iterdir()})
+
+    def test_sdk_acquire_refuses_corrupt_cached_wheel_without_replacing_it(self):
+        (repository, pool, artifacts) = self.sdk_release()
+
+        for (artifact_name, payload) in artifacts.items():
+            (pool / artifact_name).write_bytes(payload)
+
+        wheel = pool / "provider_core-9.8.7-py3-none-any.whl"
+
+        wheel.write_bytes(b"corrupt wheel")
+        build = Build("unix:///unused.sock", pool)
+
+        with patch("make.build.ROOT", repository), patch("make.build.urllib.request.urlopen") as fetch:
+            with self.assertRaisesRegex(ValueError, "cached.*whl"):
+                build.sdk_acquire()
+
+            fetch.assert_not_called()
+
+        self.assertEqual(first=b"corrupt wheel", second=wheel.read_bytes())
+
+    def test_sdk_acquire_cleans_failed_or_mismatched_downloads(self):
+        (repository, pool, artifacts) = self.sdk_release()
+        manifest_name = "provider_core-9.8.7-sha256.json"
+
+        (pool / manifest_name).write_bytes(artifacts[manifest_name])
+        build = Build("unix:///unused.sock", pool)
+
+        for response in (OSError("injected transfer failure"), io.BytesIO(b"wrong downloaded bytes")):
+            with self.subTest(response=type(response)):
+                with patch("make.build.ROOT", repository), patch("make.build.urllib.request.urlopen", side_effect=[response]):
+                    with self.assertRaises((OSError, ValueError)):
+                        build.sdk_acquire()
+
+                self.assertEqual(first={manifest_name}, second={entry.name for entry in pool.iterdir()})
+
+    def test_sdk_acquire_cleans_an_interrupted_partial_download(self):
+        (repository, pool, artifacts) = self.sdk_release()
+        manifest_name = "provider_core-9.8.7-sha256.json"
+
+        (pool / manifest_name).write_bytes(artifacts[manifest_name])
+        build = Build("unix:///unused.sock", pool)
+
+        with patch("make.build.ROOT", repository), patch("make.build.urllib.request.urlopen") as fetch:
+            response = fetch.return_value.__enter__.return_value
+            response.read.side_effect = [b"partial artifact", OSError("injected interrupted stream")]
+
+            with self.assertRaisesRegex(OSError, "interrupted stream"):
+                build.sdk_acquire()
+
+        self.assertEqual(first={manifest_name}, second={entry.name for entry in pool.iterdir()})
+
+    def test_sdk_acquire_refuses_oversized_download_and_cleans_partial(self):
+        (repository, pool, artifacts) = self.sdk_release()
+        manifest_name = "provider_core-9.8.7-sha256.json"
+
+        (pool / manifest_name).write_bytes(artifacts[manifest_name])
+        build = Build("unix:///unused.sock", pool)
+        oversized = io.BytesIO(b"x" * ((8 * 1024 * 1024) + 1))
+
+        with patch("make.build.ROOT", repository), patch("make.build.urllib.request.urlopen", return_value=oversized):
+            with self.assertRaisesRegex(ValueError, "8 MiB"):
+                build.sdk_acquire()
+
+        self.assertEqual(first={manifest_name}, second={entry.name for entry in pool.iterdir()})

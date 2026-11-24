@@ -1,0 +1,3 @@
+# One SDK release for the provider and both scientific workers
+provider-core==0.7.7
+# release-manifest-sha256 = fad68c2ba9864f08720bff24ba473f0f1ee0b83e51fc9130f81b80709ba17ca5
