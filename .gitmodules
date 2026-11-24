@@ -1,0 +1,3 @@
+[submodule "moldetr-upstream"]
+	path = model/upstream
+	url = https://github.com/numpde/fork-of-MolDeTr.git
