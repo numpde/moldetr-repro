@@ -1,0 +1,6 @@
+# MolDeTr's published spin-system checkpoint. The byte count and SHA-256
+# come from the Git LFS pointer at the pinned Hugging Face mirror revision:
+# https://huggingface.co/smidooo/moldetr/raw/537e379d8438739017a8d8920f8013ae8e8dc122/model_spin_system_ABCDEFG_exp2.pth
+# Upstream identifies the same file in Zenodo record 21217102.
+# Columns: SHA-256, maximum downloaded bytes, path relative to /checkpoints
+1f98a57b24c9ddbb04ddf16228d327e354928237ec574ee187d8969be5ccdd20  973617196  model_spin_system_ABCDEFG_exp2.pth

@@ -1,0 +1,237 @@
+name: moldetr-weights
+
+# Acquire the pinned MolDeTr checkpoint into one persistent Docker volume
+# volume-init grants downloader ownership, download installs verified files,
+# and verify independently checks the sealed volume without network or writes
+# Run with an explicit local Docker context and Compose project
+# `make weights/download` runs initialization, download and verification in order
+# Recheck without downloading weights: `run --rm --no-deps verify`.
+#
+# Output lives in Docker's <project>_checkpoints volume, not in this checkout
+# For project moldetr-weights, that is moldetr-weights_checkpoints
+# Containers see /checkpoints/model_spin_system_ABCDEFG_exp2.pth
+# Each .part is renamed after verification, so there is no second staging copy
+# Failure or interruption retains completed files and any .part for inspection/resume
+# Existing unrelated regular files are neither verified nor removed
+#
+# Make removes each one-shot container when it exits
+# `down --remove-orphans` removes leftovers/network but keeps the volume and cached image
+# `down --volumes` also deletes the checkpoints
+#
+# The checkpoint volume has no filesystem quota. Curl bounds each transfer
+# CPU, RAM and PID ceilings follow magnet/docker/compose/fetch.yaml
+x-curl-image: &curl-image docker.io/curlimages/curl:8.21.0@sha256:7c12af72ceb38b7432ab85e1a265cff6ae58e06f95539d539b654f2cfa64bb13
+
+x-contained: &contained
+  pull_policy: never
+  image: *curl-image
+  logging:
+    driver: local
+    options: {max-size: "1m", max-file: "2", compress: "true"}
+  init: true
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  restart: "no"
+
+x-checksums: &checksums
+  type: bind
+  source: model/checkpoints.sha256
+  target: /checks/checkpoints.sha256
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-export-checksums: &export-checksums
+  type: bind
+  source: model/exported.sha256
+  target: /checks/exported.sha256
+  read_only: true
+  bind:
+    create_host_path: false
+
+networks:
+  fetch-egress: {}
+
+volumes:
+  checkpoints: {}
+
+services:
+  volume-init:
+    <<: *contained
+    user: "0:0"
+    network_mode: none
+    cap_add:
+      # The downloader must own the volume root to reopen its 0555 directory
+      - CHOWN
+    pids_limit: 16
+    cpus: 0.25
+    mem_limit: 32m
+    memswap_limit: 32m
+    volumes:
+      - type: volume
+        source: checkpoints
+        target: /checkpoints
+        volume:
+          nocopy: true
+    entrypoint: [chown]
+    command: ["curl_user:curl_group", /checkpoints]
+
+  download:
+    <<: *contained
+    user: "curl_user:curl_group"
+    environment:
+      # This endpoint must be reachable from the container, not just host loopback
+      PROXY_URL: ${PROXY_URL:-}
+    networks:
+      - fetch-egress
+    pids_limit: 64
+    cpus: 1
+    mem_limit: 256m
+    memswap_limit: 256m
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    working_dir: /checkpoints
+    volumes:
+      - type: volume
+        source: checkpoints
+        target: /checkpoints
+        volume:
+          nocopy: true
+      - *checksums
+      - *export-checksums
+    entrypoint: [/bin/sh, -eu, -c]
+    command:
+      - |
+        # Compose turns $$ into $ before the container shell expands variables
+        case "$$PROXY_URL" in
+          '')
+            printf '%s\n' 'Cannot download checkpoints: set PROXY_URL=<url> or PROXY_URL=none.' >&2
+            exit 2
+            ;;
+          none) download_proxy= ;;
+          *) download_proxy=$$PROXY_URL ;;
+        esac
+        checkpoint_release_url=https://huggingface.co/smidooo/moldetr/resolve/537e379d8438739017a8d8920f8013ae8e8dc122
+        checksum_file=/checks/checkpoints.sha256
+
+        # Reject links and special files before opening paths in the reused volume
+        non_regular_entry=$$(find /checkpoints -xdev ! -type d ! -type f -print -quit)
+        if test -n "$$non_regular_entry"; then
+          printf 'Cannot download checkpoints: volume contains a non-regular entry: %s\n' "$$non_regular_entry" >&2
+          exit 1
+        fi
+
+        # The downloader owns the volume root and may reopen it on a later run
+        chmod 0755 /checkpoints
+        while read -r expected_sha256 maximum_file_bytes checkpoint_file; do
+          case "$$expected_sha256" in '#'*) continue ;; esac
+          if test -f "$$checkpoint_file"; then
+            actual=$$(sha256sum "$$checkpoint_file")
+            actual=$${actual%% *}
+            if test "$$actual" = "$$expected_sha256"; then
+              # A source checkpoint is never a sanitized export, even if an old marker remains.
+              rm -f "$$checkpoint_file.sanitized.json"
+              sync -f /checkpoints
+              chmod 0444 "$$checkpoint_file"
+              continue
+            fi
+            if ! awk -v digest="$$actual" '$$1 == digest { found=1 } END { exit !found }' /checks/exported.sha256; then
+              printf 'Cannot restore %s: unrecognized SHA-256 %s\n' "$$checkpoint_file" "$$actual" >&2
+              exit 1
+            fi
+            printf 'Restoring the original training checkpoint over the verified export of %s\n' "$$checkpoint_file"
+          fi
+
+          partial_file=$$checkpoint_file.part
+
+          if test -f "$$partial_file" && test "$$(stat -c %s "$$partial_file")" -gt "$$maximum_file_bytes"; then
+            printf 'Cannot resume %s: partial file exceeds the published byte limit.\n' "$$partial_file" >&2
+            exit 1
+          fi
+
+          # Partial files stay private until their checksum matches
+          umask 077
+          # Curl durations are seconds and the slow-transfer limit is bytes/second
+          # --disable must be first to ignore curlrc. --continue-at - uses the local file size
+          # Empty --proxy selects direct routing; empty --noproxy prevents inherited bypasses
+          printf 'Downloading %s (resuming any partial file)\n' "$$checkpoint_file"
+          curl --disable --fail --location --show-error --no-progress-meter \
+            --proxy "$$download_proxy" --noproxy '' \
+            --proto '=https' --proto-redir '=https' \
+            --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 7200 \
+            --connect-timeout 15 --max-time 3600 \
+            --speed-limit 1024 --speed-time 60 --max-filesize "$$maximum_file_bytes" \
+            --continue-at - --output "$$partial_file" "$$checkpoint_release_url/$$checkpoint_file"
+
+          printf '%s  %s\n' "$$expected_sha256" "$$partial_file" | sha256sum -c -
+          chmod 0444 "$$partial_file"
+          rm -f "$$checkpoint_file.sanitized.json"
+          sync -f /checkpoints
+          mv "$$partial_file" "$$checkpoint_file"
+        done < "$$checksum_file"
+
+        # Leave the verified checkpoint readable by the model worker.
+        chmod 0555 /checkpoints
+
+  verify:
+    <<: *contained
+    user: "curl_user:curl_group"
+    network_mode: none
+    pids_limit: 16
+    cpus: 0.25
+    mem_limit: 32m
+    memswap_limit: 32m
+    depends_on:
+      download:
+        condition: service_completed_successfully
+    working_dir: /checkpoints
+    volumes:
+      - type: volume
+        source: checkpoints
+        target: /checkpoints
+        read_only: true
+        volume:
+          nocopy: true
+      - *checksums
+      - *export-checksums
+    entrypoint: [/bin/sh, -eu, -c]
+    command:
+      - |
+        while read -r source_hash size filename; do
+          case "$$source_hash" in '#'*) continue ;; esac
+          actual=$$(sha256sum "$$filename")
+          actual=$${actual%% *}
+          if test "$$actual" = "$$source_hash"; then
+            printf '%s: verified upstream checkpoint\n' "$$filename"
+          else
+            awk -v digest="$$actual" -v file="$$filename" '
+              $$1 == digest { print file ": verified " $$2 " export"; found=1; exit }
+              END { if (!found) { print file ": unrecognized SHA-256 " digest > "/dev/stderr"; exit 1 } }
+            ' /checks/exported.sha256
+          fi
+        done < /checks/checkpoints.sha256
+
+  sanitize:
+    <<: *contained
+    profiles: [sanitize]
+    image: moldetr/weights-sanitizer:local
+    network_mode: none
+    user: "100:101"
+    cpus: 1
+    pids_limit: 64
+    mem_limit: 4g
+    memswap_limit: 4g
+    volumes:
+      - type: volume
+        source: checkpoints
+        target: /checkpoints
+        volume:
+          nocopy: true
+      - *checksums
+      - *export-checksums
+
+    entrypoint: [python, -IB, /opt/sanitize/checkpoints.py, --output-manifest, /checks/exported.sha256, --extract, model, --inert-global, fastcore.foundation.L]

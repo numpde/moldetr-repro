@@ -1,0 +1,8 @@
+# Tensor-only exports of the upstream checkpoint pinned in checkpoints.sha256.
+# PyTorch 2.12.0+cpu, generated with containers/weights-sanitize/checkpoints.py.
+# Columns: SHA-256 of the entire .pth file, FP mode, floating dtype (preserve keeps source dtypes).
+6b7475004ee50a880f4b3dae8554990406e576f0c160e4e78656721acf6181e0  keep  preserve
+21494a61126263a1bda6a17ea92f3d1f503a018ea775ce437c9f2b7100f01874  fp16  float16
+74c0b82cf0f4250db99db70c2fd88058562346a12b7467d1939145da78d82da1  bf16  bfloat16
+6b7475004ee50a880f4b3dae8554990406e576f0c160e4e78656721acf6181e0  fp32  float32
+b429efa4d1be938c942ac5afe2a4bc8d1aaa1575b1c7e69addb91c052d45cf0d  fp64  float64
