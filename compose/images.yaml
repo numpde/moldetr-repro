@@ -1,0 +1,73 @@
+# One declaration for external inputs and local builds.
+# Compose pulls image-only services; Bake builds services with a build definition.
+x-python313: &python313
+  PYTHON_BASE: &python313-image docker.io/library/python:3.13.18-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72
+  PY_VERSION: "3.13.18"
+x-python312: &python312
+  PYTHON_BASE: &python312-image docker.io/library/python:3.12.16-slim-bookworm@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487
+  PY_VERSION: "3.12.16"
+x-build: &build
+  platforms: [linux/amd64]
+  network: none
+x-inputs: &inputs
+  wheels: ${WHEELHOUSE:-/missing-chefnmr2-wheelhouse}
+  installation: ${INSTALLATION:-/missing-chefnmr2-installation}
+
+services:
+  python313:
+    image: *python313-image
+  python312:
+    image: *python312-image
+  checkpoint-download:
+    image: docker.io/curlimages/curl:8.21.0@sha256:7c12af72ceb38b7432ab85e1a265cff6ae58e06f95539d539b654f2cfa64bb13
+
+  provider:
+    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/provider:local
+    build:
+      <<: *build
+      context: containers/provider
+      args: *python313
+      additional_contexts:
+        <<: *inputs
+        model: ./model
+  worker-cpu:
+    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/worker-cpu:local
+    build:
+      <<: *build
+      context: containers/worker
+      args:
+        <<: *python313
+        TORCH_INDEX: https://download.pytorch.org/whl/cpu
+      additional_contexts:
+        <<: *inputs
+        model: ./model
+        upstream: ./model/upstream
+  worker-cuda:
+    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/worker-cuda:local
+    build:
+      <<: *build
+      context: containers/worker
+      args:
+        <<: *python312
+        TORCH_INDEX: https://download.pytorch.org/whl/cu130
+      additional_contexts:
+        <<: *inputs
+        model: ./model
+        upstream: ./model/upstream
+  weights-sanitize:
+    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/weights-sanitizer:local
+    build:
+      <<: *build
+      context: containers/weights-sanitize
+      args:
+        <<: *python312
+        TORCH_INDEX: https://download.pytorch.org/whl/cpu
+      additional_contexts: *inputs
+  lock:
+    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/lock:local
+    build:
+      <<: *build
+      context: containers/lock
+      args: *python313
+      additional_contexts:
+        uv: docker-image://ghcr.io/astral-sh/uv@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0
