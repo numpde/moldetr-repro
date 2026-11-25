@@ -9,9 +9,6 @@ x-python312: &python312
 x-build: &build
   platforms: [linux/amd64]
   network: none
-x-inputs: &inputs
-  wheels: ${WHEELHOUSE:-/missing-chefnmr2-wheelhouse}
-  installation: ${INSTALLATION:-/missing-chefnmr2-installation}
 
 services:
   python313:
@@ -22,16 +19,15 @@ services:
     image: docker.io/curlimages/curl:8.21.0@sha256:7c12af72ceb38b7432ab85e1a265cff6ae58e06f95539d539b654f2cfa64bb13
 
   provider:
-    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/provider:local
+    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/provider:local"
     build:
       <<: *build
       context: containers/provider
       args: *python313
       additional_contexts:
-        <<: *inputs
         model: ./model
   worker-cpu:
-    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/worker-cpu:local
+    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/worker-cpu:local"
     build:
       <<: *build
       context: containers/worker
@@ -39,11 +35,10 @@ services:
         <<: *python313
         TORCH_INDEX: https://download.pytorch.org/whl/cpu
       additional_contexts:
-        <<: *inputs
         model: ./model
         upstream: ./model/upstream
   worker-cuda:
-    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/worker-cuda:local
+    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/worker-cuda:local"
     build:
       <<: *build
       context: containers/worker
@@ -51,20 +46,18 @@ services:
         <<: *python312
         TORCH_INDEX: https://download.pytorch.org/whl/cu130
       additional_contexts:
-        <<: *inputs
         model: ./model
         upstream: ./model/upstream
   weights-sanitize:
-    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/weights-sanitizer:local
+    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/weights-sanitizer:local"
     build:
       <<: *build
       context: containers/weights-sanitize
       args:
         <<: *python312
         TORCH_INDEX: https://download.pytorch.org/whl/cpu
-      additional_contexts: *inputs
   lock:
-    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/lock:local
+    image: "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE}/lock:local"
     build:
       <<: *build
       context: containers/lock
