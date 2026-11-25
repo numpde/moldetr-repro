@@ -1,0 +1,16 @@
+# Local IDE and workspace state.
+/.idea/
+/.agents/
+/.codex/
+/tmp/
+
+# Local configuration and credentials.
+/.aws/
+.env
+.env.*
+/secrets/
+
+# Python and notebook byproducts.
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
